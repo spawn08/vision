@@ -42,9 +42,11 @@ def get_available_video_models():
 # before they are compared to the eager model outputs. This is useful if the
 # model outputs are different between TorchScript / Eager mode
 script_test_models = {
+    'deeplabv3_resnet50': {},
     'deeplabv3_resnet101': {},
     'mobilenet_v2': {},
     'resnext50_32x4d': {},
+    'fcn_resnet50': {},
     'fcn_resnet101': {},
     'googlenet': {
         'unwrapper': lambda x: x.logits
@@ -153,6 +155,24 @@ class ModelTester(TestCase):
         # self.check_script(model, name)
         self.checkModule(model, name, ([x],))
 
+    def _test_detection_model_validation(self, name):
+        set_rng_seed(0)
+        model = models.detection.__dict__[name](num_classes=50, pretrained_backbone=False)
+        input_shape = (1, 3, 300, 300)
+        x = [torch.rand(input_shape)]
+
+        # validate that targets are present in training
+        self.assertRaises(ValueError, model, x)
+
+        # validate type
+        targets = [{'boxes': 0.}]
+        self.assertRaises(ValueError, model, x, targets=targets)
+
+        # validate boxes shape
+        for boxes in (torch.rand((4,)), torch.rand((1, 5))):
+            targets = [{'boxes': boxes}]
+            self.assertRaises(ValueError, model, x, targets=targets)
+
     def _test_video_model(self, name):
         # the default input shape is
         # bs * num_channels * clip_len * h *w
@@ -226,6 +246,51 @@ class ModelTester(TestCase):
         self.assertTrue("scores" in out[0])
         self.assertTrue("labels" in out[0])
 
+    def test_googlenet_eval(self):
+        m = torch.jit.script(models.googlenet(pretrained=True).eval())
+        self.checkModule(m, "googlenet", torch.rand(1, 3, 224, 224))
+
+    @unittest.skipIf(not torch.cuda.is_available(), 'needs GPU')
+    def test_fasterrcnn_switch_devices(self):
+        model = models.detection.fasterrcnn_resnet50_fpn(num_classes=50, pretrained_backbone=False)
+        model.cuda()
+        model.eval()
+        input_shape = (3, 300, 300)
+        x = torch.rand(input_shape, device='cuda')
+        model_input = [x]
+        out = model(model_input)
+        self.assertIs(model_input[0], x)
+        self.assertEqual(len(out), 1)
+        self.assertTrue("boxes" in out[0])
+        self.assertTrue("scores" in out[0])
+        self.assertTrue("labels" in out[0])
+        # now switch to cpu and make sure it works
+        model.cpu()
+        x = x.cpu()
+        out_cpu = model([x])
+        self.assertTrue("boxes" in out_cpu[0])
+        self.assertTrue("scores" in out_cpu[0])
+        self.assertTrue("labels" in out_cpu[0])
+
+    def test_generalizedrcnn_transform_repr(self):
+
+        min_size, max_size = 224, 299
+        image_mean = [0.485, 0.456, 0.406]
+        image_std = [0.229, 0.224, 0.225]
+
+        t = models.detection.transform.GeneralizedRCNNTransform(min_size=min_size,
+                                                                max_size=max_size,
+                                                                image_mean=image_mean,
+                                                                image_std=image_std)
+
+        # Check integrity of object __repr__ attribute
+        expected_string = 'GeneralizedRCNNTransform('
+        _indent = '\n    '
+        expected_string += '{0}Normalize(mean={1}, std={2})'.format(_indent, image_mean, image_std)
+        expected_string += '{0}Resize(min_size=({1},), max_size={2}, '.format(_indent, min_size, max_size)
+        expected_string += "mode='bilinear')\n)"
+        self.assertEqual(t.__repr__(), expected_string)
+
 
 for model_name in get_available_classification_models():
     # for-loop bodies don't define scopes, so we have to save the variables
@@ -255,6 +320,11 @@ for model_name in get_available_detection_models():
         self._test_detection_model(model_name)
 
     setattr(ModelTester, "test_" + model_name, do_test)
+
+    def do_validation_test(self, model_name=model_name):
+        self._test_detection_model_validation(model_name)
+
+    setattr(ModelTester, "test_" + model_name + "_validation", do_validation_test)
 
 
 for model_name in get_available_video_models():

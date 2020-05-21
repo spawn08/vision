@@ -1,5 +1,3 @@
-from __future__ import division
-
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 import torch
 import torch.nn.functional as F
@@ -10,6 +8,7 @@ from torchvision.ops.boxes import box_area
 
 from torch.jit.annotations import Optional, List, Dict, Tuple
 import torchvision
+
 
 # copying result_idx_in_level to a specific index in result[]
 # is not supported by ONNX tracing yet.
@@ -23,23 +22,22 @@ def _onnx_merge_levels(levels, unmerged_results):
     res = torch.zeros((levels.size(0), first_result.size(1),
                        first_result.size(2), first_result.size(3)),
                       dtype=dtype, device=device)
-    for l in range(len(unmerged_results)):
-        index = (levels == l).nonzero().view(-1, 1, 1, 1)
+    for level in range(len(unmerged_results)):
+        index = (levels == level).nonzero().view(-1, 1, 1, 1)
         index = index.expand(index.size(0),
-                             unmerged_results[l].size(1),
-                             unmerged_results[l].size(2),
-                             unmerged_results[l].size(3))
-        res = res.scatter(0, index, unmerged_results[l])
+                             unmerged_results[level].size(1),
+                             unmerged_results[level].size(2),
+                             unmerged_results[level].size(3))
+        res = res.scatter(0, index, unmerged_results[level])
     return res
 
 
 # TODO: (eellison) T54974082 https://github.com/pytorch/pytorch/issues/26744/pytorch/issues/26744
 def initLevelMapper(k_min, k_max, canonical_scale=224, canonical_level=4, eps=1e-6):
-    # type: (int, int, int, int, float)
+    # type: (int, int, int, int, float) -> LevelMapper
     return LevelMapper(k_min, k_max, canonical_scale, canonical_level, eps)
 
 
-@torch.jit.script
 class LevelMapper(object):
     """Determine which FPN level each RoI in a set of RoIs should map to based
     on the heuristic in the FPN paper.
@@ -53,7 +51,7 @@ class LevelMapper(object):
     """
 
     def __init__(self, k_min, k_max, canonical_scale=224, canonical_level=4, eps=1e-6):
-        # type: (int, int, int, int, float)
+        # type: (int, int, int, int, float) -> None
         self.k_min = k_min
         self.k_max = k_max
         self.s0 = canonical_scale
@@ -61,7 +59,7 @@ class LevelMapper(object):
         self.eps = eps
 
     def __call__(self, boxlists):
-        # type: (List[Tensor])
+        # type: (List[Tensor]) -> Tensor
         """
         Arguments:
             boxlists (list[BoxList])
@@ -120,7 +118,7 @@ class MultiScaleRoIAlign(nn.Module):
         self.map_levels = None
 
     def convert_to_roi_format(self, boxes):
-        # type: (List[Tensor])
+        # type: (List[Tensor]) -> Tensor
         concat_boxes = torch.cat(boxes, dim=0)
         device, dtype = concat_boxes.device, concat_boxes.dtype
         ids = torch.cat(
@@ -134,19 +132,19 @@ class MultiScaleRoIAlign(nn.Module):
         return rois
 
     def infer_scale(self, feature, original_size):
-        # type: (Tensor, List[int])
+        # type: (Tensor, List[int]) -> float
         # assumption: the scale is of the form 2 ** (-k), with k integer
         size = feature.shape[-2:]
         possible_scales = torch.jit.annotate(List[float], [])
         for s1, s2 in zip(size, original_size):
-            approx_scale = float(s1) / s2
+            approx_scale = float(s1) / float(s2)
             scale = 2 ** float(torch.tensor(approx_scale).log2().round())
             possible_scales.append(scale)
         assert possible_scales[0] == possible_scales[1]
         return possible_scales[0]
 
     def setup_scales(self, features, image_shapes):
-        # type: (List[Tensor], List[Tuple[int, int]])
+        # type: (List[Tensor], List[Tuple[int, int]]) -> None
         assert len(image_shapes) != 0
         max_x = 0
         max_y = 0
@@ -164,7 +162,7 @@ class MultiScaleRoIAlign(nn.Module):
         self.map_levels = initLevelMapper(int(lvl_min), int(lvl_max))
 
     def forward(self, x, boxes, image_shapes):
-        # type: (Dict[str, Tensor], List[Tensor], List[Tuple[int, int]])
+        # type: (Dict[str, Tensor], List[Tensor], List[Tuple[int, int]]) -> Tensor
         """
         Arguments:
             x (OrderedDict[Tensor]): feature maps for each level. They are assumed to have

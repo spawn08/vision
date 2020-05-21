@@ -36,7 +36,7 @@ setup_cuda() {
   # Wheel builds need suffixes (but not if they're on OS X, which never has suffix)
   if [[ "$BUILD_TYPE" == "wheel" ]] && [[ "$(uname)" != Darwin ]]; then
     # The default CUDA has no suffix
-    if [[ "$CU_VERSION" != "cu101" ]]; then
+    if [[ "$CU_VERSION" != "cu102" ]]; then
       export PYTORCH_VERSION_SUFFIX="+$CU_VERSION"
     fi
     # Match the suffix scheme of pytorch, unless this package does not have
@@ -49,6 +49,17 @@ setup_cuda() {
 
   # Now work out the CUDA settings
   case "$CU_VERSION" in
+    cu102)
+      if [[ "$OSTYPE" == "msys" ]]; then
+        export CUDA_HOME="C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v10.2"
+      else
+        export CUDA_HOME=/usr/local/cuda-10.2/
+      fi
+      export FORCE_CUDA=1
+      # Hard-coding gencode flags is temporary situation until
+      # https://github.com/pytorch/pytorch/pull/23408 lands
+      export NVCC_FLAGS="-gencode=arch=compute_35,code=sm_35 -gencode=arch=compute_50,code=sm_50 -gencode=arch=compute_60,code=sm_60 -gencode=arch=compute_70,code=sm_70 -gencode=arch=compute_75,code=sm_75 -gencode=arch=compute_50,code=compute_50"
+      ;;
     cu101)
       if [[ "$OSTYPE" == "msys" ]]; then
         export CUDA_HOME="C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v10.1"
@@ -106,12 +117,27 @@ setup_build_version() {
   else
     export BUILD_VERSION="$BUILD_VERSION$VERSION_SUFFIX"
   fi
+
+  # Set build version based on tag if on tag
+  if [[ -n "${CIRCLE_TAG}" ]]; then
+    # Strip tag
+    export BUILD_VERSION="$(echo "${CIRCLE_TAG}" | sed -e 's/^v//' -e 's/-.*$//')"
+  fi
 }
 
 # Set some useful variables for OS X, if applicable
 setup_macos() {
   if [[ "$(uname)" == Darwin ]]; then
     export MACOSX_DEPLOYMENT_TARGET=10.9 CC=clang CXX=clang++
+  fi
+}
+
+# set variable to determine whether the typing library needs to be built in
+setup_typing() {
+  if [[ "$PYTHON_VERSION" == 3.5 ]]; then
+    export CONDA_TYPING_CONSTRAINT="- typing"
+  else
+    export CONDA_TYPING_CONSTRAINT=""
   fi
 }
 
@@ -122,6 +148,7 @@ setup_env() {
   setup_cuda
   setup_build_version "$1"
   setup_macos
+  setup_typing
 }
 
 # Function to retry functions that sometimes timeout or have flaky failures
@@ -155,6 +182,7 @@ setup_wheel_python() {
       3.5) python_abi=cp35-cp35m ;;
       3.6) python_abi=cp36-cp36m ;;
       3.7) python_abi=cp37-cp37m ;;
+      3.8) python_abi=cp38-cp38 ;;
       *)
         echo "Unrecognized PYTHON_VERSION=$PYTHON_VERSION"
         exit 1
@@ -184,8 +212,9 @@ setup_pip_pytorch_version() {
       export PYTORCH_VERSION="$(pip show torch | grep ^Version: | sed 's/Version:  *//')"
     fi
   else
-    pip_install "torch==$PYTORCH_VERSION$CUDA_SUFFIX" \
+    pip_install "torch==$PYTORCH_VERSION$PYTORCH_VERSION_SUFFIX" \
       -f https://download.pytorch.org/whl/torch_stable.html \
+      -f https://download.pytorch.org/whl/test/torch_test.html
       -f https://download.pytorch.org/whl/nightly/torch_nightly.html
   fi
 }
@@ -193,7 +222,7 @@ setup_pip_pytorch_version() {
 # Fill PYTORCH_VERSION with the latest conda nightly version, and
 # CONDA_CHANNEL_FLAGS with appropriate flags to retrieve these versions
 #
-# You MUST have populated CUDA_SUFFIX before hand.
+# You MUST have populated PYTORCH_VERSION_SUFFIX before hand.
 setup_conda_pytorch_constraint() {
   if [[ -z "$PYTORCH_VERSION" ]]; then
     export CONDA_CHANNEL_FLAGS="-c pytorch-nightly"
@@ -211,7 +240,7 @@ setup_conda_pytorch_constraint() {
       exit 1
     fi
   else
-    export CONDA_CHANNEL_FLAGS="-c pytorch -c pytorch-nightly"
+    export CONDA_CHANNEL_FLAGS="-c pytorch -c pytorch-nightly -c pytorch-test"
   fi
   if [[ "$CU_VERSION" == cpu ]]; then
     export CONDA_PYTORCH_BUILD_CONSTRAINT="- pytorch==$PYTORCH_VERSION${PYTORCH_VERSION_SUFFIX}"
@@ -229,6 +258,9 @@ setup_conda_cudatoolkit_constraint() {
     export CONDA_CUDATOOLKIT_CONSTRAINT=""
   else
     case "$CU_VERSION" in
+      cu102)
+        export CONDA_CUDATOOLKIT_CONSTRAINT="- cudatoolkit >=10.2,<10.3 # [not osx]"
+        ;;
       cu101)
         export CONDA_CUDATOOLKIT_CONSTRAINT="- cudatoolkit >=10.1,<10.2 # [not osx]"
         ;;
@@ -257,5 +289,11 @@ setup_visual_studio_constraint() {
       export VSDEVCMD_ARGS=''
       conda build $CONDA_CHANNEL_FLAGS --no-anaconda-upload packaging/$VSTOOLCHAIN_PACKAGE
       cp packaging/$VSTOOLCHAIN_PACKAGE/conda_build_config.yaml packaging/torchvision/conda_build_config.yaml
+  fi
+}
+
+setup_junit_results_folder() {
+  if [[ "$CI" == "true" ]]; then
+    export CONDA_PYTORCH_BUILD_RESULTS_DIRECTORY="${SOURCE_ROOT_DIR}/build_results/results.xml"
   fi
 }

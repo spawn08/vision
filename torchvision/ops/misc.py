@@ -1,4 +1,3 @@
-from __future__ import division
 from collections import OrderedDict
 from torch.jit.annotations import Optional, List
 from torch import Tensor
@@ -14,61 +13,33 @@ is implemented
 """
 
 import math
+import warnings
 import torch
 from torchvision.ops import _new_empty_tensor
-from torch.nn import Module, Conv2d
-import torch.nn.functional as F
+
+
+class Conv2d(torch.nn.Conv2d):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        warnings.warn(
+            "torchvision.ops.misc.Conv2d is deprecated and will be "
+            "removed in future versions, use torch.nn.Conv2d instead.", FutureWarning)
 
 
 class ConvTranspose2d(torch.nn.ConvTranspose2d):
-    """
-    Equivalent to nn.ConvTranspose2d, but with support for empty batch sizes.
-    This will eventually be supported natively by PyTorch, and this
-    class can go away.
-    """
-    def forward(self, x):
-        if x.numel() > 0:
-            return self.super_forward(x)
-        # get output shape
-
-        output_shape = [
-            (i - 1) * d - 2 * p + (di * (k - 1) + 1) + op
-            for i, p, di, k, d, op in zip(
-                x.shape[-2:],
-                list(self.padding),
-                list(self.dilation),
-                list(self.kernel_size),
-                list(self.stride),
-                list(self.output_padding),
-            )
-        ]
-        output_shape = [x.shape[0], self.bias.shape[0]] + output_shape
-        return _new_empty_tensor(x, output_shape)
-
-    def super_forward(self, input, output_size=None):
-        # type: (Tensor, Optional[List[int]]) -> Tensor
-        if self.padding_mode != 'zeros':
-            raise ValueError('Only `zeros` padding mode is supported for ConvTranspose2d')
-
-        output_padding = self._output_padding(input, output_size, self.stride, self.padding, self.kernel_size)
-
-        return F.conv_transpose2d(
-            input, self.weight, self.bias, self.stride, self.padding,
-            output_padding, self.groups, self.dilation)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        warnings.warn(
+            "torchvision.ops.misc.ConvTranspose2d is deprecated and will be "
+            "removed in future versions, use torch.nn.ConvTranspose2d instead.", FutureWarning)
 
 
 class BatchNorm2d(torch.nn.BatchNorm2d):
-    """
-    Equivalent to nn.BatchNorm2d, but with support for empty batch sizes.
-    This will eventually be supported natively by PyTorch, and this
-    class can go away.
-    """
-    def forward(self, x):
-        if x.numel() > 0:
-            return super(BatchNorm2d, self).forward(x)
-        # get output shape
-        output_shape = x.shape
-        return _new_empty_tensor(x, output_shape)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        warnings.warn(
+            "torchvision.ops.misc.BatchNorm2d is deprecated and will be "
+            "removed in future versions, use torch.nn.BatchNorm2d instead.", FutureWarning)
 
 
 def _check_size_scale_factor(dim, size, scale_factor):
@@ -77,11 +48,13 @@ def _check_size_scale_factor(dim, size, scale_factor):
         raise ValueError("either size or scale_factor should be defined")
     if size is not None and scale_factor is not None:
         raise ValueError("only one of size or scale_factor should be defined")
-    if not (scale_factor is not None and len(scale_factor) != dim):
-        raise ValueError(
-            "scale_factor shape must match input shape. "
-            "Input is {}D, scale_factor size is {}".format(dim, len(scale_factor))
-        )
+    if scale_factor is not None:
+        if isinstance(scale_factor, (list, tuple)):
+            if len(scale_factor) != dim:
+                raise ValueError(
+                    "scale_factor shape must match input shape. "
+                    "Input is {}D, scale_factor size is {}".format(dim, len(scale_factor))
+                )
 
 
 def _output_size(dim, input, size, scale_factor):
@@ -112,7 +85,7 @@ def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corne
         )
 
     output_shape = _output_size(2, input, size, scale_factor)
-    output_shape = input.shape[:-2] + output_shape
+    output_shape = list(input.shape[:-2]) + list(output_shape)
     return _new_empty_tensor(input, output_shape)
 
 
@@ -123,12 +96,28 @@ class FrozenBatchNorm2d(torch.nn.Module):
     are fixed
     """
 
-    def __init__(self, n):
+    def __init__(self, num_features, eps=0., n=None):
+        # n=None for backward-compatibility
+        if n is not None:
+            warnings.warn("`n` argument is deprecated and has been renamed `num_features`",
+                          DeprecationWarning)
+            num_features = n
         super(FrozenBatchNorm2d, self).__init__()
-        self.register_buffer("weight", torch.ones(n))
-        self.register_buffer("bias", torch.zeros(n))
-        self.register_buffer("running_mean", torch.zeros(n))
-        self.register_buffer("running_var", torch.ones(n))
+        self.eps = eps
+        self.register_buffer("weight", torch.ones(num_features))
+        self.register_buffer("bias", torch.zeros(num_features))
+        self.register_buffer("running_mean", torch.zeros(num_features))
+        self.register_buffer("running_var", torch.ones(num_features))
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        num_batches_tracked_key = prefix + 'num_batches_tracked'
+        if num_batches_tracked_key in state_dict:
+            del state_dict[num_batches_tracked_key]
+
+        super(FrozenBatchNorm2d, self)._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs)
 
     def forward(self, x):
         # move reshapes to the beginning
@@ -137,6 +126,9 @@ class FrozenBatchNorm2d(torch.nn.Module):
         b = self.bias.reshape(1, -1, 1, 1)
         rv = self.running_var.reshape(1, -1, 1, 1)
         rm = self.running_mean.reshape(1, -1, 1, 1)
-        scale = w * rv.rsqrt()
+        scale = w * (rv + self.eps).rsqrt()
         bias = b - rm * scale
         return x * scale + bias
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.weight.shape[0]})"
